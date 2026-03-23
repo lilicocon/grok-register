@@ -57,6 +57,31 @@ cd /home/codex/grok-register
 
 默认监听 `0.0.0.0:18600`。
 
+## Docker 一键部署
+
+如果你更希望直接用容器启动控制台，可以在仓库根目录执行：
+
+```bash
+git clone git@github.com:509992828/grok-register.git
+cd grok-register
+docker compose up -d --build
+```
+
+启动后访问：
+
+- `http://<你的服务器IP>:18600`
+
+这个 Compose 会完成下面几件事：
+
+- 构建带 `Xvfb + Chrome + Python` 的运行镜像
+- 启动 Web 控制台
+- 让控制台里的任务直接复用容器内的浏览器和 Python 运行环境
+
+注意：
+
+- Docker 只能帮你把项目启动起来，不能替你提供可用的 WARP 出口、临时邮箱服务和 grok2api sink
+- 第一次启动前，你仍然需要在控制台里填好这些业务参数
+
 ## 当前配置模板
 
 ```json
@@ -78,11 +103,11 @@ cd /home/codex/grok-register
 }
 ```
 
-这段的意思是：
+配置模板说明：
 
-- 示例配置里不再带我测试时用过的私人邮箱接口和私人域名，你拿到仓库后不会直接看到别人的真实配置
-- 真正运行用的 `config.json` 还是只放你自己机器上，不会提交到 GitHub，避免把密码、token、邮箱接口这些敏感信息公开出去
-- 老版本如果还在用 `duckmail_api_base`、`duckmail_bearer` 这类旧字段，代码暂时还能读；但从现在开始，新配置统一写成 `temp_mail_api_base`、`temp_mail_admin_password`、`temp_mail_domain` 这些新字段
+- 仓库里提供的是可公开分享的示例配置，不包含任何真实邮箱接口、真实域名、密码或 token
+- 实际运行时，请把你自己的参数写进本机 `config.json` 或控制台系统配置里，不要把生产凭据提交回仓库
+- 代码兼容旧版 `duckmail_*` 字段，只是为了照顾历史配置；第一次部署的新用户，直接使用 `temp_mail_*` 这一套字段即可
 
 ## 闭环要求
 
