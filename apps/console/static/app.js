@@ -15,10 +15,13 @@
   const settingsMessageEl = document.getElementById("settingsMessage");
   const stopBtnEl = document.getElementById("stopBtn");
   const refreshBtnEl = document.getElementById("refreshBtn");
+  const healthRefreshBtnEl = document.getElementById("healthRefreshBtn");
   const toggleSettingsBtnEl = document.getElementById("toggleSettingsBtn");
   const toggleAdvancedBtnEl = document.getElementById("toggleAdvancedBtn");
   const toggleMailBtnEl = document.getElementById("toggleMailBtn");
   const advancedFieldsEl = document.getElementById("advancedFields");
+  const healthGridEl = document.getElementById("healthGrid");
+  const healthMetaEl = document.getElementById("healthMeta");
 
   function escapeHtml(value) {
     return String(value || "")
@@ -45,6 +48,30 @@
 
   function statusClass(status) {
     return `status-pill status-${status || "unknown"}`;
+  }
+
+  function healthClass(ok) {
+    return ok ? "health-pill health-ok" : "health-pill health-bad";
+  }
+
+  function renderHealth(data) {
+    const items = data.items || [];
+    healthMetaEl.textContent = `最近检测时间 ${data.checked_at || "-"}`;
+    if (!items.length) {
+      healthGridEl.innerHTML = '<div class="empty">暂无健康检查结果</div>';
+      return;
+    }
+    healthGridEl.innerHTML = items.map((item) => `
+      <div class="health-card">
+        <div class="task-row">
+          <strong>${escapeHtml(item.label)}</strong>
+          <span class="${healthClass(item.ok)}">${item.ok ? "正常" : "异常"}</span>
+        </div>
+        <div class="health-summary">${escapeHtml(item.summary || "-")}</div>
+        <div class="health-target">${escapeHtml(item.target || "-")}</div>
+        <div class="health-detail">${escapeHtml(item.detail || "-")}</div>
+      </div>
+    `).join("");
   }
 
   function renderTaskList() {
@@ -178,6 +205,17 @@
     }
   }
 
+  async function refreshHealth() {
+    try {
+      healthMetaEl.textContent = "检测中...";
+      const data = await fetchJson("/api/health");
+      renderHealth(data);
+    } catch (error) {
+      healthMetaEl.textContent = `检测失败: ${error.message}`;
+      healthGridEl.innerHTML = '<div class="empty">健康检查失败</div>';
+    }
+  }
+
   formEl.addEventListener("submit", async (event) => {
     event.preventDefault();
     const payload = {
@@ -223,6 +261,7 @@
   });
 
   refreshBtnEl.addEventListener("click", refreshAll);
+  healthRefreshBtnEl.addEventListener("click", refreshHealth);
 
   settingsFormEl.addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -247,6 +286,7 @@
       settingsMessageEl.textContent = "默认配置已保存";
       settingsMessageEl.className = "form-message success";
       setDefaults();
+      await refreshHealth();
     } catch (error) {
       settingsMessageEl.textContent = error.message;
       settingsMessageEl.className = "form-message error";
@@ -269,6 +309,8 @@
   });
 
   setDefaults();
+  refreshHealth();
   refreshAll();
   window.setInterval(refreshAll, 2000);
+  window.setInterval(refreshHealth, 15000);
 })();

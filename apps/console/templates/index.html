@@ -89,6 +89,19 @@
         </form>
       </section>
 
+      <section class="panel panel-health">
+        <div class="panel-head">
+          <div>
+            <div class="eyebrow">Health Check</div>
+            <h2>环境健康检查</h2>
+            <p class="panel-desc">启动后直接检查 `warp / grok2api / temp mail / x.ai` 四段是否可达。这里使用当前系统默认配置做连通性探测。</p>
+          </div>
+          <button id="healthRefreshBtn" class="button button-secondary" type="button">重新检测</button>
+        </div>
+        <div id="healthMeta" class="health-meta">等待检测</div>
+        <div id="healthGrid" class="health-grid"></div>
+      </section>
+
       <section class="panel panel-form">
         <div class="panel-head">
           <div>

@@ -14,7 +14,9 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
+import requests
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
@@ -187,6 +189,231 @@ def load_source_defaults() -> dict[str, Any]:
         api_base["append"] = append_env.strip().lower() in {"1", "true", "yes", "on"}
     base["api"] = api_base
     return base
+
+
+def _mask_proxy(proxy_url: str) -> str:
+    parsed = urlparse(proxy_url)
+    if not parsed.scheme or not parsed.netloc:
+        return proxy_url
+    host = parsed.hostname or ""
+    port = f":{parsed.port}" if parsed.port else ""
+    return f"{parsed.scheme}://{host}{port}"
+
+
+def _request_with_optional_proxy(
+    url: str,
+    proxy_url: str = "",
+    method: str = "GET",
+    timeout: int = 15,
+    headers: dict[str, str] | None = None,
+) -> requests.Response:
+    proxies = None
+    if proxy_url:
+        proxies = {"http": proxy_url, "https": proxy_url}
+    return requests.request(
+        method,
+        url,
+        timeout=timeout,
+        headers=headers,
+        proxies=proxies,
+        allow_redirects=True,
+    )
+
+
+def _build_health_item(
+    key: str,
+    label: str,
+    ok: bool,
+    summary: str,
+    detail: str,
+    target: str,
+) -> dict[str, Any]:
+    return {
+        "key": key,
+        "label": label,
+        "ok": ok,
+        "summary": summary,
+        "detail": detail,
+        "target": target,
+        "checked_at": now_iso(),
+    }
+
+
+def run_health_checks() -> dict[str, Any]:
+    defaults = merged_defaults()
+    items: list[dict[str, Any]] = []
+
+    browser_proxy = str(defaults.get("browser_proxy", "") or "").strip()
+    request_proxy = str(defaults.get("proxy", "") or "").strip()
+    api_conf = dict(defaults.get("api") or {})
+    api_endpoint = str(api_conf.get("endpoint", "") or "").strip()
+    temp_mail_api_base = str(defaults.get("temp_mail_api_base", "") or "").strip()
+
+    warp_target = browser_proxy or request_proxy
+    if not warp_target:
+        items.append(
+            _build_health_item(
+                "warp",
+                "WARP / Proxy",
+                False,
+                "未配置代理出口",
+                "当前系统默认配置里没有 `browser_proxy` 或 `proxy`，无法检查前置网络出口。",
+                "-",
+            )
+        )
+    else:
+        try:
+            response = _request_with_optional_proxy(
+                "https://www.cloudflare.com/cdn-cgi/trace",
+                proxy_url=warp_target,
+                timeout=20,
+            )
+            body = response.text
+            ip_match = re.search(r"(?m)^ip=(.+)$", body)
+            loc_match = re.search(r"(?m)^loc=(.+)$", body)
+            warp_match = re.search(r"(?m)^warp=(.+)$", body)
+            ip = ip_match.group(1).strip() if ip_match else "unknown"
+            loc = loc_match.group(1).strip() if loc_match else "unknown"
+            warp_state = warp_match.group(1).strip() if warp_match else "unknown"
+            ok = response.status_code == 200
+            items.append(
+                _build_health_item(
+                    "warp",
+                    "WARP / Proxy",
+                    ok,
+                    f"HTTP {response.status_code} | IP {ip} | LOC {loc}",
+                    f"通过代理 `{_mask_proxy(warp_target)}` 访问 Cloudflare trace 成功，warp={warp_state}。",
+                    _mask_proxy(warp_target),
+                )
+            )
+        except Exception as exc:
+            items.append(
+                _build_health_item(
+                    "warp",
+                    "WARP / Proxy",
+                    False,
+                    "代理出口不可达",
+                    f"通过 `{_mask_proxy(warp_target)}` 访问 Cloudflare trace 失败：{exc}",
+                    _mask_proxy(warp_target),
+                )
+            )
+
+    if not api_endpoint:
+        items.append(
+            _build_health_item(
+                "grok2api",
+                "grok2api Sink",
+                False,
+                "未配置 token sink",
+                "当前系统默认配置里没有 `api.endpoint`，注册成功后不会自动入池。",
+                "-",
+            )
+        )
+    else:
+        try:
+            response = _request_with_optional_proxy(api_endpoint, timeout=15)
+            ok = response.status_code in {200, 401, 403, 405}
+            items.append(
+                _build_health_item(
+                    "grok2api",
+                    "grok2api Sink",
+                    ok,
+                    f"HTTP {response.status_code}",
+                    "接口已可达。即使返回 401/403，也说明服务本身在线，只是需要正确的管理口令。",
+                    api_endpoint,
+                )
+            )
+        except Exception as exc:
+            items.append(
+                _build_health_item(
+                    "grok2api",
+                    "grok2api Sink",
+                    False,
+                    "接口不可达",
+                    f"访问 `{api_endpoint}` 失败：{exc}",
+                    api_endpoint,
+                )
+            )
+
+    if not temp_mail_api_base:
+        items.append(
+            _build_health_item(
+                "temp_mail",
+                "Temp Mail API",
+                False,
+                "未配置临时邮箱 API",
+                "当前系统默认配置里没有 `temp_mail_api_base`，注册流程会在创建邮箱阶段直接失败。",
+                "-",
+            )
+        )
+    else:
+        try:
+            response = _request_with_optional_proxy(
+                temp_mail_api_base,
+                proxy_url=request_proxy,
+                timeout=15,
+            )
+            ok = response.status_code < 500
+            items.append(
+                _build_health_item(
+                    "temp_mail",
+                    "Temp Mail API",
+                    ok,
+                    f"HTTP {response.status_code}",
+                    "接口地址可达。这里只做基础连通性检查，不会真的创建邮箱地址。",
+                    temp_mail_api_base,
+                )
+            )
+        except Exception as exc:
+            items.append(
+                _build_health_item(
+                    "temp_mail",
+                    "Temp Mail API",
+                    False,
+                    "接口不可达",
+                    f"访问 `{temp_mail_api_base}` 失败：{exc}",
+                    temp_mail_api_base,
+                )
+            )
+
+    xai_proxy = browser_proxy or request_proxy
+    try:
+        response = _request_with_optional_proxy(
+            "https://accounts.x.ai/sign-up?redirect=grok-com",
+            proxy_url=xai_proxy,
+            timeout=20,
+            headers={"User-Agent": "Mozilla/5.0"},
+        )
+        ok = response.status_code in {200, 301, 302, 303, 307, 308}
+        detail = f"使用 `{_mask_proxy(xai_proxy)}` 访问注册页返回 HTTP {response.status_code}。" if xai_proxy else f"直连访问注册页返回 HTTP {response.status_code}。"
+        if not ok and response.status_code in {401, 403, 429}:
+            detail += " 这通常说明当前出口被目标站点拦截、限流，或还没完成可用的人机验证链路。"
+        items.append(
+            _build_health_item(
+                "xai",
+                "x.ai Sign-up",
+                ok,
+                f"HTTP {response.status_code}",
+                detail,
+                "https://accounts.x.ai/sign-up?redirect=grok-com",
+            )
+        )
+    except Exception as exc:
+        items.append(
+            _build_health_item(
+                "xai",
+                "x.ai Sign-up",
+                False,
+                "注册页不可达",
+                f"访问 `x.ai` 注册页失败：{exc}",
+                "https://accounts.x.ai/sign-up?redirect=grok-com",
+            )
+        )
+
+    return {
+        "items": items,
+        "checked_at": now_iso(),
+    }
 
 
 class TaskCreate(BaseModel):
@@ -612,6 +839,11 @@ def api_meta() -> dict[str, Any]:
         "python_path": str(SOURCE_VENV_PYTHON),
         "max_concurrent_tasks": MAX_CONCURRENT_TASKS,
     }
+
+
+@app.get("/api/health")
+def api_health() -> dict[str, Any]:
+    return run_health_checks()
 
 
 @app.get("/api/settings")

@@ -93,6 +93,58 @@ body {
   padding: 22px;
 }
 
+.health-meta {
+  margin-bottom: 14px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.health-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.health-card {
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  padding: 16px;
+}
+
+.health-summary {
+  margin-top: 10px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.health-target,
+.health-detail {
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
+  word-break: break-word;
+}
+
+.health-pill {
+  padding: 5px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+
+.health-ok {
+  background: #dcefdc;
+  color: var(--success);
+}
+
+.health-bad {
+  background: #f7d9d3;
+  color: var(--danger);
+}
+
 .workspace {
   display: grid;
   grid-template-columns: 320px minmax(0, 1fr);
@@ -350,6 +402,7 @@ body {
 @media (max-width: 720px) {
   .task-form,
   .advanced-fields,
+  .health-grid,
   .summary-grid,
   .detail-grid {
     grid-template-columns: 1fr;
