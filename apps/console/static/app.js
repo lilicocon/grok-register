@@ -4,6 +4,9 @@
     selectedTaskId: null,
   };
 
+  const diagnoseEmailBtnEl = document.getElementById("diagnoseEmailBtn");
+  const diagnoseWrapEl = document.getElementById("diagnoseWrap");
+  const diagnoseOutputEl = document.getElementById("diagnoseOutput");
   const taskListEl = document.getElementById("taskList");
   const detailTitleEl = document.getElementById("detailTitle");
   const detailMetaEl = document.getElementById("detailMeta");
@@ -36,6 +39,7 @@
     formEl.elements.count.value = defaults.run?.count || 50;
     settingsFormEl.elements.proxy.value = defaults.proxy || "";
     settingsFormEl.elements.browser_proxy.value = defaults.browser_proxy || "";
+    settingsFormEl.elements.temp_mail_provider.value = defaults.temp_mail_provider || "";
     settingsFormEl.elements.temp_mail_api_base.value = defaults.temp_mail_api_base || "";
     settingsFormEl.elements.temp_mail_admin_password.value = defaults.temp_mail_admin_password || "";
     settingsFormEl.elements.temp_mail_domain.value = defaults.temp_mail_domain || "";
@@ -146,6 +150,7 @@
 
     const cfg = task.config || {};
     detailMetaEl.innerHTML = [
+      ["邮箱提供商", cfg.temp_mail_provider || "auto"],
       ["邮箱 API Base", cfg.temp_mail_api_base || "-"],
       ["邮箱域名", cfg.temp_mail_domain || "-"],
       ["邮箱管理密码", cfg.temp_mail_admin_password || "-"],
@@ -223,6 +228,7 @@
       count: Number(formEl.elements.count.value),
       proxy: formEl.elements.proxy.value.trim() || null,
       browser_proxy: formEl.elements.browser_proxy.value.trim() || null,
+      temp_mail_provider: formEl.elements.temp_mail_provider.value.trim() || null,
       temp_mail_api_base: formEl.elements.temp_mail_api_base.value.trim() || null,
       temp_mail_admin_password: formEl.elements.temp_mail_admin_password.value.trim() || null,
       temp_mail_domain: formEl.elements.temp_mail_domain.value.trim() || null,
@@ -268,6 +274,7 @@
     const payload = {
       proxy: settingsFormEl.elements.proxy.value.trim(),
       browser_proxy: settingsFormEl.elements.browser_proxy.value.trim(),
+      temp_mail_provider: settingsFormEl.elements.temp_mail_provider.value.trim(),
       temp_mail_api_base: settingsFormEl.elements.temp_mail_api_base.value.trim(),
       temp_mail_admin_password: settingsFormEl.elements.temp_mail_admin_password.value.trim(),
       temp_mail_domain: settingsFormEl.elements.temp_mail_domain.value.trim(),
@@ -306,6 +313,42 @@
   toggleMailBtnEl.addEventListener("click", () => {
     detailMetaEl.classList.toggle("hidden");
     toggleMailBtnEl.textContent = detailMetaEl.classList.contains("hidden") ? "展开临时邮箱参数" : "收起临时邮箱参数";
+  });
+
+  let _diagnoseSource = null;
+
+  diagnoseEmailBtnEl.addEventListener("click", () => {
+    if (_diagnoseSource) {
+      _diagnoseSource.close();
+      _diagnoseSource = null;
+      diagnoseEmailBtnEl.textContent = "开始诊断";
+      diagnoseOutputEl.textContent += "\n[已中止]";
+      return;
+    }
+    diagnoseWrapEl.classList.remove("hidden");
+    diagnoseOutputEl.textContent = "";
+    diagnoseEmailBtnEl.textContent = "中止";
+    diagnoseEmailBtnEl.disabled = false;
+
+    _diagnoseSource = new EventSource("/api/diagnose/email");
+    _diagnoseSource.onmessage = (event) => {
+      const data = JSON.parse(event.data);
+      if (data.msg) {
+        diagnoseOutputEl.textContent += data.msg + "\n";
+        diagnoseOutputEl.scrollTop = diagnoseOutputEl.scrollHeight;
+      }
+      if (data.done) {
+        _diagnoseSource.close();
+        _diagnoseSource = null;
+        diagnoseEmailBtnEl.textContent = "开始诊断";
+      }
+    };
+    _diagnoseSource.onerror = () => {
+      diagnoseOutputEl.textContent += "\n[连接断开]";
+      _diagnoseSource.close();
+      _diagnoseSource = null;
+      diagnoseEmailBtnEl.textContent = "开始诊断";
+    };
   });
 
   setDefaults();

@@ -39,6 +39,19 @@
 
         <form id="settingsForm" class="task-form hidden">
           <label>
+            <span>邮箱提供商</span>
+            <small>选择临时邮箱服务类型。留空则按 API Base 地址自动检测。</small>
+            <select name="temp_mail_provider">
+              <option value="">自动检测</option>
+              <option value="tempmail">TempMail.lol</option>
+              <option value="duckmail">DuckMail</option>
+              <option value="yydsmail">YydsMail</option>
+              <option value="mailtm">Mail.tm</option>
+              <option value="moemail">MoeMail</option>
+              <option value="generic">Generic / Cloudflare Temp Email</option>
+            </select>
+          </label>
+          <label>
             <span>浏览器代理</span>
             <small>浏览器访问 x.ai 时走的代理，通常填本机 WARP 桥接地址。</small>
             <input name="browser_proxy" placeholder="例如 http://127.0.0.1:18118">
@@ -102,6 +115,21 @@
         <div id="healthGrid" class="health-grid"></div>
       </section>
 
+      <section class="panel panel-diagnose">
+        <div class="panel-head">
+          <div>
+            <div class="eyebrow">Email Diagnose</div>
+            <h2>邮箱 API 诊断</h2>
+            <p class="panel-desc">测试当前系统配置的临时邮箱能否正常创建和收件。</p>
+          </div>
+          <button id="diagnoseEmailBtn" class="button button-secondary" type="button">开始诊断</button>
+        </div>
+        <div id="diagnoseWrap" class="console-wrap hidden">
+          <div class="console-head">诊断日志</div>
+          <pre id="diagnoseOutput" class="console-output"></pre>
+        </div>
+      </section>
+
       <section class="panel panel-form">
         <div class="panel-head">
           <div>
@@ -127,6 +155,19 @@
             <button id="toggleAdvancedBtn" class="button button-secondary" type="button">高级设置</button>
           </div>
           <div id="advancedFields" class="advanced-fields full hidden">
+            <label>
+              <span>邮箱提供商覆盖</span>
+              <small>只覆盖当前任务，留空则继续用系统默认值。</small>
+              <select name="temp_mail_provider">
+                <option value="">留空则用系统默认</option>
+                <option value="tempmail">TempMail.lol</option>
+                <option value="duckmail">DuckMail</option>
+                <option value="yydsmail">YydsMail</option>
+                <option value="mailtm">Mail.tm</option>
+                <option value="moemail">MoeMail</option>
+                <option value="generic">Generic / Cloudflare Temp Email</option>
+              </select>
+            </label>
             <label>
               <span>浏览器代理覆盖</span>
               <small>只覆盖当前任务，留空则继续用系统默认值。</small>

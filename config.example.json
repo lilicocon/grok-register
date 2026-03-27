@@ -2,10 +2,43 @@
     "run": {
         "count": 50
     },
+
+    "_comment_provider": "可选值: tempmail | duckmail | yydsmail | mailtm | moemail | generic（留空则按 api_base hostname 自动检测）",
+    "temp_mail_provider": "",
+
+    "_comment_generic": "--- Generic / Cloudflare Temp Email 自部署 ---",
     "temp_mail_api_base": "https://mail-api.example.com",
     "temp_mail_admin_password": "<your_admin_password>",
     "temp_mail_domain": "mail.example.com",
     "temp_mail_site_password": "",
+
+    "_comment_duckmail": "--- DuckMail (https://api.duckmail.sbs) ---",
+    "_duckmail_temp_mail_provider": "duckmail",
+    "_duckmail_temp_mail_api_base": "https://api.duckmail.sbs",
+    "_duckmail_temp_mail_admin_password": "dk_your_bearer_token",
+    "_duckmail_temp_mail_domain": "",
+
+    "_comment_yydsmail": "--- YydsMail (https://maliapi.215.im) ---",
+    "_yydsmail_temp_mail_provider": "yydsmail",
+    "_yydsmail_temp_mail_api_base": "https://maliapi.215.im",
+    "_yydsmail_temp_mail_admin_password": "AC-your_api_key",
+    "_yydsmail_temp_mail_domain": "",
+
+    "_comment_tempmail": "--- TempMail.lol (https://api.tempmail.lol/v2, 免费无需 API Key) ---",
+    "_tempmail_temp_mail_provider": "tempmail",
+    "_tempmail_temp_mail_api_base": "",
+    "_tempmail_temp_mail_admin_password": "tempmail.xxxxxxxx.your_api_key",
+
+    "_comment_mailtm": "--- Mail.tm (https://api.mail.tm, 免费无需 API Key) ---",
+    "_mailtm_temp_mail_provider": "mailtm",
+    "_mailtm_temp_mail_api_base": "https://api.mail.tm",
+    "_mailtm_temp_mail_admin_password": "",
+
+    "_comment_moemail": "--- MoeMail 自部署 ---",
+    "_moemail_temp_mail_provider": "moemail",
+    "_moemail_temp_mail_api_base": "https://your-moemail-instance.example.com",
+    "_moemail_temp_mail_admin_password": "your_api_key",
+
     "proxy": "",
     "browser_proxy": "",
     "api": {

@@ -89,7 +89,10 @@ co.set_argument("--no-sandbox")
 co.set_argument("--disable-gpu")
 co.set_argument("--disable-dev-shm-usage")
 co.set_argument("--disable-software-rasterizer")
-if not os.environ.get("DISPLAY"):
+co.set_argument("--disable-blink-features=AutomationControlled")
+# macOS 有原生显示，不需要 headless；Linux 无 DISPLAY 才启用
+import platform as _platform
+if _platform.system() == "Linux" and not os.environ.get("DISPLAY"):
     co.set_argument("--headless=new")
 
 # 从 config.json 读取代理配置给浏览器
@@ -241,31 +244,26 @@ return !!(givenInput && familyInput && passwordInput);
         return False
 
 
-def click_email_signup_button(timeout=10):
-    # 页面打开后，自动点击“使用邮箱注册”按钮。
+def click_email_signup_button(timeout=15):
+    # 页面打开后，自动点击”使用邮箱注册”按钮。
+    # 用 page.ele() 原生查找，避免 headless 下 innerText 布局依赖问题。
+    texts = ['使用邮箱注册', 'Sign up with email', 'Continue with email']
     deadline = time.time() + timeout
     while time.time() < deadline:
-        clicked = page.run_js(r"""
-const candidates = Array.from(document.querySelectorAll('button, a, [role="button"]'));
-const target = candidates.find((node) => {
-    const text = (node.innerText || node.textContent || '').replace(/\s+/g, '').toLowerCase();
-    return text.includes('使用邮箱注册') || text.includes('signupwithemail') || text.includes('signupemail') || text.includes('continuewith email') || text.includes('email');
-});
-
-if (!target) {
-    return false;
-}
-
-target.click();
-return true;
-        """)
-
-        if clicked:
-            return True
-
+        for text in texts:
+            ele = page.ele(f'text:{text}')
+            if ele:
+                ele.click()
+                return True
         time.sleep(0.5)
-
-    raise Exception('未找到“使用邮箱注册”按钮')
+    shot_path = os.path.join(os.path.dirname(__file__), "debug_signup.png")
+    try:
+        page.get_screenshot(path=shot_path, full_page=True)
+    except Exception:
+        pass
+    page_url = getattr(page, 'url', '未知')
+    page_title = getattr(page, 'title', '未知')
+    raise Exception(f'未找到”使用邮箱注册”按钮 | url={page_url} title={page_title} | 截图={shot_path}')
 
 
 def fill_email_and_submit(timeout=15):
@@ -388,6 +386,14 @@ return true;
             )
 
             if clicked:
+                # 等页面响应后检测域名拒绝
+                time.sleep(1.5)
+                rejected = page.run_js(r"""
+const t = (document.body && document.body.innerText) || '';
+return t.includes('已被拒绝') || t.includes('domain has been rejected') || t.includes('domain was rejected') || t.includes('been rejected');
+                """)
+                if rejected:
+                    raise Exception(f"EMAIL_DOMAIN_REJECTED:{email}")
                 print(f"[*] 已填写邮箱并点击注册: {email}")
                 return email, dev_token
 
@@ -399,7 +405,7 @@ return true;
 
 def fill_code_and_submit(email, dev_token, timeout=60):
     # 复用 `email_register.py` 里的验证码轮询逻辑，等待邮件到达后自动填写 OTP。
-    code = get_oai_code(dev_token, email)
+    code = get_oai_code(dev_token, email, timeout=90)
     if not code:
         raise Exception("获取验证码失败")
 
@@ -1154,7 +1160,19 @@ def push_sso_to_api(new_tokens: list):
 def run_single_registration(output_path=DEFAULT_SSO_FILE, extract_numbers=False):
     # 单轮流程：打开注册页 -> 完成注册 -> 获取 sso -> 写 txt。
     open_signup_page()
-    email, dev_token = fill_email_and_submit()
+    for _attempt in range(5):
+        try:
+            email, dev_token = fill_email_and_submit()
+            break
+        except Exception as _e:
+            if "EMAIL_DOMAIN_REJECTED" in str(_e):
+                rejected_addr = str(_e).split(":", 1)[-1].strip()
+                print(f"[Warn] 邮箱域名被拒绝: {rejected_addr}，换邮箱重试")
+                open_signup_page()
+            else:
+                raise
+    else:
+        raise Exception("邮箱域名连续被拒绝5次，终止本轮")
     fill_code_and_submit(email, dev_token)
     profile = fill_profile_and_submit()
     sso_value = wait_for_sso_cookie()

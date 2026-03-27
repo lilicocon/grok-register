@@ -18,7 +18,7 @@ from urllib.parse import urlparse
 
 import requests
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from fastapi import Request
@@ -39,7 +39,7 @@ SOURCE_VENV_PYTHON = Path(
 MAX_CONCURRENT_TASKS = max(1, int(os.getenv("GROK_REGISTER_CONSOLE_MAX_CONCURRENT_TASKS", "1")))
 SUPERVISOR_INTERVAL = max(1.0, float(os.getenv("GROK_REGISTER_CONSOLE_POLL_INTERVAL", "2")))
 
-PROJECT_FILES = ("DrissionPage_example.py", "email_register.py")
+PROJECT_FILES = ("DrissionPage_example.py", "email_register.py", "mail_providers.py")
 PROJECT_DIRS = ("turnstilePatch",)
 
 STATUS_QUEUED = "queued"
@@ -148,6 +148,7 @@ def load_source_defaults() -> dict[str, Any]:
                 "run": {"count": 50},
                 "proxy": "",
                 "browser_proxy": "",
+                "temp_mail_provider": "",
                 "temp_mail_api_base": "",
                 "temp_mail_admin_password": "",
                 "temp_mail_domain": "",
@@ -421,6 +422,7 @@ class TaskCreate(BaseModel):
     count: int = Field(50, ge=1, le=5000)
     proxy: str | None = None
     browser_proxy: str | None = None
+    temp_mail_provider: str | None = None
     temp_mail_api_base: str | None = None
     temp_mail_admin_password: str | None = None
     temp_mail_domain: str | None = None
@@ -434,6 +436,7 @@ class TaskCreate(BaseModel):
 class SystemSettings(BaseModel):
     proxy: str = ""
     browser_proxy: str = ""
+    temp_mail_provider: str = ""
     temp_mail_api_base: str = ""
     temp_mail_admin_password: str = ""
     temp_mail_domain: str = ""
@@ -471,6 +474,12 @@ def write_settings(settings: SystemSettings) -> dict[str, Any]:
         """,
         ("system", json.dumps(data, ensure_ascii=False), now_iso()),
     )
+    config_path = SOURCE_PROJECT / "config.json"
+    merged = merged_defaults()
+    content = json.dumps(merged, ensure_ascii=False, indent=2) + "\n"
+    tmp = config_path.with_suffix(".tmp")
+    tmp.write_text(content, encoding="utf-8")
+    tmp.replace(config_path)
     return data
 
 
@@ -481,7 +490,7 @@ def merged_defaults() -> dict[str, Any]:
         base["proxy"] = str(saved.get("proxy", ""))
     if saved.get("browser_proxy") is not None:
         base["browser_proxy"] = str(saved.get("browser_proxy", ""))
-    for key in ("temp_mail_api_base", "temp_mail_admin_password", "temp_mail_domain", "temp_mail_site_password"):
+    for key in ("temp_mail_provider", "temp_mail_api_base", "temp_mail_admin_password", "temp_mail_domain", "temp_mail_site_password"):
         if key in saved:
             base[key] = str(saved.get(key, ""))
     api_base = dict(base.get("api") or {})
@@ -502,6 +511,7 @@ def build_task_config(payload: TaskCreate) -> dict[str, Any]:
         "run": {"count": int(payload.count)},
         "proxy": defaults.get("proxy", "") if payload.proxy is None else payload.proxy.strip(),
         "browser_proxy": defaults.get("browser_proxy", "") if payload.browser_proxy is None else payload.browser_proxy.strip(),
+        "temp_mail_provider": defaults.get("temp_mail_provider", "") if payload.temp_mail_provider is None else payload.temp_mail_provider.strip(),
         "temp_mail_api_base": defaults.get("temp_mail_api_base", "") if payload.temp_mail_api_base is None else payload.temp_mail_api_base.strip(),
         "temp_mail_admin_password": defaults.get("temp_mail_admin_password", "") if payload.temp_mail_admin_password is None else payload.temp_mail_admin_password.strip(),
         "temp_mail_domain": defaults.get("temp_mail_domain", "") if payload.temp_mail_domain is None else payload.temp_mail_domain.strip(),
@@ -844,6 +854,51 @@ def api_meta() -> dict[str, Any]:
 @app.get("/api/health")
 def api_health() -> dict[str, Any]:
     return run_health_checks()
+
+
+@app.get("/api/diagnose/email")
+def diagnose_email() -> StreamingResponse:
+    script = SOURCE_PROJECT / "diagnose.py"
+
+    def generate():
+        if not script.exists():
+            yield f"data: {json.dumps({'msg': f'[错误] 找不到 {script}', 'done': True})}\n\n"
+            return
+        if not SOURCE_VENV_PYTHON.exists():
+            yield f"data: {json.dumps({'msg': f'[错误] 找不到 Python: {SOURCE_VENV_PYTHON}', 'done': True})}\n\n"
+            return
+        cmd = [str(SOURCE_VENV_PYTHON), "-u", str(script)]
+        proc = None
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                cwd=str(SOURCE_PROJECT),
+            )
+            for line in proc.stdout:
+                line = line.rstrip("\n")
+                if line:
+                    yield f"data: {json.dumps({'msg': line})}\n\n"
+            proc.wait()
+            yield f"data: {json.dumps({'msg': f'[完成] 退出码 {proc.returncode}', 'done': True})}\n\n"
+        except Exception as exc:
+            yield f"data: {json.dumps({'msg': f'[错误] {exc}', 'done': True})}\n\n"
+        finally:
+            if proc and proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.get("/api/settings")
