@@ -25,6 +25,9 @@
   const advancedFieldsEl = document.getElementById("advancedFields");
   const healthGridEl = document.getElementById("healthGrid");
   const healthMetaEl = document.getElementById("healthMeta");
+  const validateTokensBtnEl = document.getElementById("validateTokensBtn");
+  const validateWrapEl = document.getElementById("validateWrap");
+  const validateOutputEl = document.getElementById("validateOutput");
 
   function escapeHtml(value) {
     return String(value || "")
@@ -348,6 +351,41 @@
       _diagnoseSource.close();
       _diagnoseSource = null;
       diagnoseEmailBtnEl.textContent = "开始诊断";
+    };
+  });
+
+  let _validateSource = null;
+
+  validateTokensBtnEl.addEventListener("click", () => {
+    if (_validateSource) {
+      _validateSource.close();
+      _validateSource = null;
+      validateTokensBtnEl.textContent = "开始检测";
+      validateOutputEl.textContent += "\n[已中止]";
+      return;
+    }
+    validateWrapEl.classList.remove("hidden");
+    validateOutputEl.textContent = "";
+    validateTokensBtnEl.textContent = "中止";
+
+    _validateSource = new EventSource("/api/tokens/validate");
+    _validateSource.onmessage = (event) => {
+      const data = JSON.parse(event.data);
+      if (data.msg) {
+        validateOutputEl.textContent += data.msg + "\n";
+        validateOutputEl.scrollTop = validateOutputEl.scrollHeight;
+      }
+      if (data.done) {
+        _validateSource.close();
+        _validateSource = null;
+        validateTokensBtnEl.textContent = "开始检测";
+      }
+    };
+    _validateSource.onerror = () => {
+      validateOutputEl.textContent += "\n[连接断开]";
+      _validateSource.close();
+      _validateSource = null;
+      validateTokensBtnEl.textContent = "开始检测";
     };
   });
 

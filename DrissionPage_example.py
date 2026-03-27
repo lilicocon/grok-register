@@ -9,6 +9,7 @@ import time
 import os
 import secrets
 import sys
+import threading
 
 from email_register import get_email_and_token, get_oai_code
 
@@ -1101,6 +1102,7 @@ def push_sso_to_api(new_tokens: list):
     append_mode = api_conf.get("append", True)
 
     if not endpoint or not api_token:
+        print("[Warn] api.endpoint 或 api.token 未配置，跳过推送")
         return
 
     headers = {
@@ -1155,6 +1157,182 @@ def push_sso_to_api(new_tokens: list):
             print(f"[Warn] 推送 API 返回异常: HTTP {resp.status_code} {resp.text[:200]}")
     except Exception as e:
         print(f"[Warn] 推送 API 失败: {e}")
+
+
+def validate_and_clean_tokens(config_path: str | None = None) -> dict:
+    # 从 grok2api 获取全量 SSO token，并发验证有效性，清理失效后回写。
+    # 返回 {"valid": int, "invalid": int, "total": int}
+    import json
+    import urllib3
+    import requests
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+    if config_path is None:
+        config_path = os.path.join(os.path.dirname(__file__), "config.json")
+
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            conf = json.load(f)
+    except Exception as e:
+        print(f"[Warn] 读取 config.json 失败，跳过验证: {e}")
+        return {"valid": 0, "invalid": 0, "total": 0}
+
+    api_conf = conf.get("api", {})
+    endpoint = str(api_conf.get("endpoint", "")).strip()
+    api_token = str(api_conf.get("token", "")).strip()
+
+    if not endpoint or not api_token:
+        print("[Warn] api.endpoint 或 api.token 未配置，跳过验证")
+        return {"valid": 0, "invalid": 0, "total": 0}
+
+    headers = {
+        "Authorization": f"Bearer {api_token}",
+        "Content-Type": "application/json",
+    }
+
+    # Step 1: 获取全量 token 列表
+    try:
+        get_resp = requests.get(endpoint, headers=headers, timeout=15, verify=False)
+        if get_resp.status_code != 200:
+            print(f"[Error] 获取 token 列表失败: HTTP {get_resp.status_code}")
+            return {"valid": 0, "invalid": 0, "total": 0}
+        data = get_resp.json()
+    except Exception as e:
+        print(f"[Error] 获取 token 列表异常: {e}")
+        return {"valid": 0, "invalid": 0, "total": 0}
+
+    # 兼容两种响应格式
+    if isinstance(data, dict) and isinstance(data.get("tokens"), dict):
+        existing = data["tokens"].get("ssoBasic", [])
+    else:
+        existing = data.get("ssoBasic", []) if isinstance(data, dict) else []
+
+    all_tokens = [
+        item["token"] if isinstance(item, dict) else str(item)
+        for item in existing if item
+    ]
+
+    if not all_tokens:
+        print("[*] token 池为空，无需验证")
+        return {"valid": 0, "invalid": 0, "total": 0}
+
+    print(f"[*] 获取到 {len(all_tokens)} 个 token，开始并发验证（workers=8）...")
+
+    # Step 2: 并发验证
+    VALIDATE_URL = "https://api.x.ai/v1/models"
+
+    def _check(token: str) -> tuple[str, bool]:
+        try:
+            resp = requests.get(
+                VALIDATE_URL,
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=10,
+            )
+            # 仅 401/403 判定失效；其他状态码（含网络超时异常）保守保留
+            return token, resp.status_code not in (401, 403)
+        except Exception:
+            return token, True  # 网络异常 = 保留
+
+    valid_tokens: list[str] = []
+    invalid_count = 0
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        futures = {executor.submit(_check, t): t for t in all_tokens}
+        for future in as_completed(futures):
+            token, is_valid = future.result()
+            if is_valid:
+                valid_tokens.append(token)
+            else:
+                invalid_count += 1
+
+    total = len(all_tokens)
+    valid_count = len(valid_tokens)
+    print(f"[*] 验证完成：有效 {valid_count} / 失效 {invalid_count}，共 {total}")
+
+    if invalid_count == 0:
+        print("[*] 无失效 token，无需清理")
+        return {"valid": valid_count, "invalid": 0, "total": total}
+
+    # Step 3: 回写有效 token（覆盖模式）
+    try:
+        post_resp = requests.post(
+            endpoint,
+            json={"ssoBasic": valid_tokens},
+            headers=headers,
+            timeout=60,
+            verify=False,
+        )
+        if post_resp.status_code == 200:
+            print(f"[*] 已清理失效 token，池中剩余 {valid_count} 个有效 token: {endpoint}")
+        else:
+            print(f"[Warn] 回写 API 返回异常: HTTP {post_resp.status_code} {post_resp.text[:200]}")
+    except Exception as e:
+        print(f"[Warn] 回写 API 失败: {e}")
+
+    return {"valid": valid_count, "invalid": invalid_count, "total": total}
+
+
+def _enable_nsfw_batch(tokens: list, endpoint: str, api_token: str) -> None:
+    """后台线程 worker：向 endpoint/nsfw/enable 批量激活 NSFW。"""
+    import requests
+    import urllib3
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+    nsfw_endpoint = f"{endpoint}/nsfw/enable"
+    headers = {
+        "Authorization": f"Bearer {api_token}",
+        "Content-Type": "application/json",
+    }
+    try:
+        resp = requests.post(
+            nsfw_endpoint,
+            json={"ssoBasic": tokens},
+            headers=headers,
+            timeout=120,  # gRPC 调用链较慢
+            verify=False,
+        )
+        if resp.status_code == 200:
+            print(f"[*] NSFW 批量激活完成（{len(tokens)} 个）: {nsfw_endpoint}")
+        else:
+            print(f"[Warn] NSFW 激活返回: HTTP {resp.status_code} {resp.text[:200]}")
+    except Exception as e:
+        print(f"[Warn] NSFW 激活失败: {e}")
+
+
+def enable_nsfw_async(tokens: list) -> "threading.Thread | None":
+    """本批注册全部完成后，异步批量激活 NSFW。返回线程对象，调用方 join 以等待完成。"""
+    import json as _json
+    fresh = [t for t in tokens if t]
+    if not fresh:
+        return None
+
+    config_path = os.path.join(os.path.dirname(__file__), "config.json")
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            conf = _json.load(f)
+    except Exception as e:
+        print(f"[Warn] 读取 config.json 失败，跳过 NSFW 激活: {e}")
+        return None
+
+    api_conf = conf.get("api", {})
+    endpoint = str(api_conf.get("endpoint", "")).strip()
+    api_token = str(api_conf.get("token", "")).strip()
+
+    if not endpoint or not api_token:
+        print("[Warn] api.endpoint 或 api.token 未配置，跳过 NSFW 激活")
+        return None
+
+    print(f"[*] 本批 {len(fresh)} 个账号 NSFW 激活已在后台启动...")
+    t = threading.Thread(
+        target=_enable_nsfw_batch,
+        args=(fresh, endpoint, api_token),
+        daemon=False,
+        name="nsfw-batch",
+    )
+    t.start()
+    return t
 
 
 def run_single_registration(output_path=DEFAULT_SSO_FILE, extract_numbers=False):
@@ -1226,10 +1404,15 @@ def main():
     parser.add_argument("--count", type=int, default=config_count, help=f"执行轮数，0 表示无限循环（默认读取 config.json run.count，当前 {config_count}）")
     parser.add_argument("--output", default=DEFAULT_SSO_FILE, help="sso 输出 txt 路径")
     parser.add_argument("--extract-numbers", action="store_true", help="注册完成后额外提取页面数字文本")
+    parser.add_argument("--validate-only", action="store_true", help="仅验证并清理 token 池，不执行注册")
     args = parser.parse_args()
 
+    if args.validate_only:
+        validate_and_clean_tokens()
+        return
+
     current_round = 0
-    collected_sso: list = []
+    batch_sso: list = []
     try:
         start_browser()
         while True:
@@ -1238,12 +1421,11 @@ def main():
 
             current_round += 1
             print(f"\n[*] 开始第 {current_round} 轮注册")
-            round_succeeded = False
 
             try:
                 result = run_single_registration(args.output, extract_numbers=args.extract_numbers)
-                collected_sso.append(result["sso"])
-                round_succeeded = True
+                push_sso_to_api([result["sso"]])
+                batch_sso.append(result["sso"])
             except KeyboardInterrupt:
                 print("\n[Info] 收到中断信号，停止后续轮次。")
                 break
@@ -1256,11 +1438,11 @@ def main():
                 time.sleep(2)
 
     finally:
-        if collected_sso:
-            print(f"\n[*] 注册完成，推送 {len(collected_sso)} 个 token 到 API...")
-            push_sso_to_api(collected_sso)
-
         stop_browser()
+
+    nsfw_thread = enable_nsfw_async(batch_sso)
+    if nsfw_thread:
+        nsfw_thread.join()
 
 
 if __name__ == "__main__":

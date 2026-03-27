@@ -130,6 +130,21 @@
         </div>
       </section>
 
+      <section class="panel panel-validate">
+        <div class="panel-head">
+          <div>
+            <div class="eyebrow">Token Validate</div>
+            <h2>Token 有效性检测</h2>
+            <p class="panel-desc">并发检测 grok2api token 池中的失效 token，自动清理后回写。使用系统默认 API 配置。</p>
+          </div>
+          <button id="validateTokensBtn" class="button button-secondary" type="button">开始检测</button>
+        </div>
+        <div id="validateWrap" class="console-wrap hidden">
+          <div class="console-head">检测结果</div>
+          <pre id="validateOutput" class="console-output"></pre>
+        </div>
+      </section>
+
       <section class="panel panel-form">
         <div class="panel-head">
           <div>
@@ -152,7 +167,7 @@
             <input name="count" type="number" min="1" max="5000" required>
           </label>
           <div class="full advanced-toggle-row">
-            <button id="toggleAdvancedBtn" class="button button-secondary" type="button">高级设置</button>
+            <button id="toggleAdvancedBtn" class="accordion-toggle" type="button">高级设置</button>
           </div>
           <div id="advancedFields" class="advanced-fields full hidden">
             <label>

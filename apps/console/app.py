@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import shutil
@@ -11,12 +12,14 @@ import threading
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
 import requests
+import urllib3
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -49,6 +52,18 @@ STATUS_COMPLETED = "completed"
 STATUS_PARTIAL = "partial"
 STATUS_FAILED = "failed"
 STATUS_STOPPED = "stopped"
+_TERMINAL_STATUSES = (STATUS_COMPLETED, STATUS_PARTIAL, STATUS_FAILED, STATUS_STOPPED)
+
+# 过滤高频轮询路由的访问日志（GET /api/tasks、/api/health 等每2秒刷新的请求）
+class _PollingLogFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage()
+        return '"GET /api/tasks' not in msg and '"GET /api/health' not in msg
+
+logging.getLogger("uvicorn.access").addFilter(_PollingLogFilter())
+
+# 已完成任务的日志保留天数（超过后启动时自动删除 task 目录，DB 记录保留）
+_LOG_RETENTION_HOURS = int(os.getenv("GROK_REGISTER_LOG_RETENTION_HOURS", "6"))
 
 LINE_RE_ROUND = re.compile(r"开始第\s*(\d+)\s*轮注册")
 LINE_RE_SUCCESS = re.compile(r"注册成功\s*\|\s*email=([^|\s]+)")
@@ -812,9 +827,23 @@ class TaskSupervisor:
 supervisor = TaskSupervisor()
 
 
+def _cleanup_old_task_logs() -> None:
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=_LOG_RETENTION_HOURS)).isoformat()
+    placeholders = ",".join("?" * len(_TERMINAL_STATUSES))
+    rows = fetch_all(
+        f"SELECT id, task_dir FROM tasks WHERE status IN ({placeholders}) AND created_at < ?",
+        (*_TERMINAL_STATUSES, cutoff),
+    )
+    for row in rows:
+        task_dir = Path(row["task_dir"])
+        if task_dir.exists() and task_dir.is_dir():
+            shutil.rmtree(task_dir, ignore_errors=True)
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     init_db()
+    _cleanup_old_task_logs()
     supervisor.start()
     try:
         yield
@@ -980,6 +1009,115 @@ def delete_task(task_id: int) -> dict[str, Any]:
     delete_task_files(row)
     execute_no_return("DELETE FROM tasks WHERE id = ?", (task_id,))
     return {"ok": True}
+
+
+@app.get("/api/tokens/validate")
+def validate_tokens_stream() -> StreamingResponse:
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+    def _sse(msg: str, **extra: Any) -> str:
+        return f"data: {json.dumps({'msg': msg, **extra}, ensure_ascii=False)}\n\n"
+
+    def generate():
+        api_conf = dict(merged_defaults().get("api") or {})
+        endpoint = str(api_conf.get("endpoint", "")).strip()
+        api_token = str(api_conf.get("token", "")).strip()
+
+        if not endpoint or not api_token:
+            yield _sse("[错误] api.endpoint 或 api.token 未配置，请先在系统设置中填写。", done=True)
+            return
+
+        headers = {"Authorization": f"Bearer {api_token}", "Content-Type": "application/json"}
+
+        # Step 1: 获取全量 token 列表
+        yield _sse(f"[*] 正在从 {endpoint} 获取 token 列表...")
+        try:
+            get_resp = requests.get(endpoint, headers=headers, timeout=15, verify=False)
+            if get_resp.status_code != 200:
+                yield _sse(f"[错误] 获取 token 列表失败: HTTP {get_resp.status_code}", done=True)
+                return
+            data = get_resp.json()
+        except Exception as e:
+            yield _sse(f"[错误] 获取 token 列表异常: {e}", done=True)
+            return
+
+        if isinstance(data, dict) and isinstance(data.get("tokens"), dict):
+            existing = data["tokens"].get("ssoBasic", [])
+        else:
+            existing = data.get("ssoBasic", []) if isinstance(data, dict) else []
+
+        all_tokens = [
+            item["token"] if isinstance(item, dict) else str(item)
+            for item in existing if item
+        ]
+        total = len(all_tokens)
+
+        if not total:
+            yield _sse("[*] token 池为空，无需检测。", done=True)
+            return
+
+        yield _sse(f"[*] 获取到 {total} 个 token，开始并发验证（workers=8）...")
+
+        # Step 2: 并发验证
+        VALIDATE_URL = "https://api.x.ai/v1/models"
+
+        def _check(token: str) -> tuple[str, bool]:
+            try:
+                resp = requests.get(
+                    VALIDATE_URL,
+                    headers={"Authorization": f"Bearer {token}"},
+                    timeout=10,
+                )
+                return token, resp.status_code not in (401, 403)
+            except Exception:
+                return token, True  # 网络异常 = 保留
+
+        valid_tokens: list[str] = []
+        invalid_tokens: list[str] = []
+        done_count = 0
+
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            futures = {executor.submit(_check, t): t for t in all_tokens}
+            for future in as_completed(futures):
+                token, is_valid = future.result()
+                done_count += 1
+                short = token[:16] + "..."
+                if is_valid:
+                    valid_tokens.append(token)
+                    yield _sse(f"  ✓ [{done_count}/{total}] 有效  {short}")
+                else:
+                    invalid_tokens.append(token)
+                    yield _sse(f"  ✗ [{done_count}/{total}] 失效  {short}")
+
+        valid_count = len(valid_tokens)
+        invalid_count = len(invalid_tokens)
+
+        if invalid_count == 0:
+            yield _sse(f"[*] 全部 {total} 个 token 有效，无需清理。", done=True, valid=valid_count, invalid=0, total=total, cleaned=False)
+            return
+
+        # Step 3: 回写有效 token（覆盖模式）
+        yield _sse(f"[*] 检测完成：有效 {valid_count} / 失效 {invalid_count}，正在清理并回写...")
+        try:
+            post_resp = requests.post(
+                endpoint,
+                json={"ssoBasic": valid_tokens},
+                headers=headers,
+                timeout=60,
+                verify=False,
+            )
+            if post_resp.status_code == 200:
+                yield _sse(f"[*] 已清理完成，池中剩余 {valid_count} 个有效 token。", done=True, valid=valid_count, invalid=invalid_count, total=total, cleaned=True)
+            else:
+                yield _sse(f"[错误] 回写失败: HTTP {post_resp.status_code} {post_resp.text[:200]}", done=True)
+        except Exception as e:
+            yield _sse(f"[错误] 回写异常: {e}", done=True)
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 if __name__ == "__main__":
